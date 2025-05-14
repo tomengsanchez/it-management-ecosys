@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Asset Manager
  * Description: Custom post type for managing assets with history tracking, custom fields, PDF export, and more.
- * Version: 1.8.2
+ * Version: 1.8.3 
  * Author: Your Name
  * Text Domain: asset-manager
  * Domain Path: /languages
@@ -11,7 +11,7 @@
 if (!defined('ABSPATH')) exit; // Exit if accessed directly
 
 // Define constants
-define('ASSET_MANAGER_VERSION', '1.8.2'); // MODIFIED version
+define('ASSET_MANAGER_VERSION', '1.8.3'); // MODIFIED version - Updated for new field
 define('ASSET_MANAGER_POST_TYPE', 'asset');
 define('ASSET_MANAGER_TAXONOMY', 'asset_category');
 define('ASSET_MANAGER_META_PREFIX', '_asset_manager_');
@@ -101,9 +101,10 @@ class Asset_Manager {
 
 
     // IMPROVEMENT: Model is now the second field.
+    // MODIFICATION: Added 'location' field
     private $fields = [
         'asset_tag', 'model', 'serial_number', 'brand', 'supplier',
-        'date_purchased', 'issued_to', 'status', 'description'
+        'date_purchased', 'issued_to', 'status', 'location', 'description'
     ];
 
     // IMPROVEMENT: "Unassigned" added as the first status option.
@@ -134,6 +135,7 @@ class Asset_Manager {
     private function get_field_labels() {
         // Order of labels here doesn't affect display order in meta box,
         // that's controlled by $this->fields and the HTML structure in render_asset_fields_meta_box
+        // MODIFICATION: Added 'location' label
         return [
             'asset_tag'     => __('Asset Tag', 'asset-manager'),
             'serial_number' => __('Serial Number', 'asset-manager'),
@@ -143,6 +145,7 @@ class Asset_Manager {
             'date_purchased'=> __('Date Purchased', 'asset-manager'),
             'issued_to'     => __('Issued To', 'asset-manager'),
             'status'        => __('Status', 'asset-manager'),
+            'location'      => __('Location', 'asset-manager'), // New field label
             'description'   => __('Description', 'asset-manager'),
             ASSET_MANAGER_META_PREFIX . 'asset_category' => __('Category', 'asset-manager'),
         ];
@@ -242,7 +245,7 @@ class Asset_Manager {
                     <textarea id="<?php echo esc_attr($field_id); ?>" name="<?php echo esc_attr($field_name); ?>" class="widefat" rows="5" required><?php echo esc_textarea($value); ?></textarea>
                 <?php elseif ($field_key === 'date_purchased') : ?>
                     <input type="date" id="<?php echo esc_attr($field_id); ?>" name="<?php echo esc_attr($field_name); ?>" value="<?php echo esc_attr($value); ?>" class="widefat" required>
-                <?php else : // For asset_tag, serial_number, brand, model, supplier ?>
+                <?php else : // For asset_tag, serial_number, brand, model, supplier, location ?>
                     <input type="text" id="<?php echo esc_attr($field_id); ?>" name="<?php echo esc_attr($field_name); ?>" value="<?php echo esc_attr($value); ?>" class="widefat" required>
                 <?php endif; ?>
             </p>
@@ -276,6 +279,7 @@ class Asset_Manager {
         } echo '</ul>';
     }
 
+    // MODIFICATION: Added validation for 'location'
     private function _validate_asset_data(array $form_data): array {
         $errors = [];
         $field_labels = $this->get_field_labels();
@@ -299,10 +303,10 @@ class Asset_Manager {
                  } elseif (!in_array($value, $this->status_options, true)) {
                      $errors[] = sprintf(__('Invalid value selected for the %s field.', 'asset-manager'), $field_labels[$field_key]);
                  }
-            } elseif (empty($value) && $value !== '0') {
+            } elseif (empty($value) && $value !== '0') { // Standard required field check, applies to 'location' too
                 if ($field_key === 'issued_to' && $form_data[$post_field_key] === '') {
                     $errors[] = sprintf(__('The %s field is required; please select a user.', 'asset-manager'), $field_labels[$field_key]);
-                } elseif ($field_key !== 'issued_to') {
+                } elseif ($field_key !== 'issued_to') { // All other text fields including 'location'
                     $errors[] = sprintf(__('The %s field is required.', 'asset-manager'), $field_labels[$field_key]);
                 }
             }
@@ -317,6 +321,7 @@ class Asset_Manager {
     }
 
 
+    // MODIFICATION: Added save and history tracking for 'location'
     public function save_asset_meta($post_id, $post) {
         if (!isset($_POST[ASSET_MANAGER_META_PREFIX . 'details_nonce']) || !wp_verify_nonce($_POST[ASSET_MANAGER_META_PREFIX . 'details_nonce'], ASSET_MANAGER_META_PREFIX . 'save_details_nonce')) { return; }
         if (!current_user_can('edit_post', $post_id)) { return; }
@@ -369,6 +374,7 @@ class Asset_Manager {
                 case 'status': // Ensure the status is one of the predefined options
                     $new_value_sanitized = in_array($new_value_raw, $this->status_options, true) ? sanitize_text_field($new_value_raw) : $this->status_options[0]; // Default to first option (Unassigned) if invalid
                     break;
+                // case 'location': // Covered by default sanitize_text_field
                 default: 
                     $new_value_sanitized = sanitize_text_field($new_value_raw);
                     break;
@@ -402,7 +408,7 @@ class Asset_Manager {
                         $new_user_display = $new_user_data ? $new_user_data->display_name : sprintf(__('Unknown User (ID: %s)', 'asset-manager'), $new_value_comparable);
                     }
                     $changes[] = sprintf(esc_html__('%1$s changed from "%2$s" to "%3$s"', 'asset-manager'), esc_html($label), esc_html($old_user_display), esc_html($new_user_display));
-                } else {
+                } else { // Covers 'location' and other text fields
                     $changes[] = sprintf(esc_html__('%1$s changed from "%2$s" to "%3$s"', 'asset-manager'), esc_html($label), esc_html((string)$old_value), esc_html((string)$new_value_sanitized));
                 }
             }
@@ -454,18 +460,17 @@ class Asset_Manager {
         }
     }
     
+    // MODIFICATION: Added 'location' column
     public function custom_columns($columns) { 
-        // Re-order columns if needed to match new field order, e.g., model after asset_tag.
-        // For this example, I'll keep the column definition logic simple and focused on the requested changes.
-        // You might want to adjust this to reflect the importance of the 'model' field if it's now more prominent.
         $new_columns = [ 
             'cb' => $columns['cb'], 
             'title' => __('Title', 'asset-manager'), 
             'asset_tag' => __('Asset Tag', 'asset-manager'), 
-            'model' => __('Model', 'asset-manager'), // Added model column
+            'model' => __('Model', 'asset-manager'),
             'serial_number' => __('Serial Number', 'asset-manager'), 
             'brand' => __('Brand', 'asset-manager'), 
             'asset_category'=> __('Category', 'asset-manager'), 
+            'location' => __('Location', 'asset-manager'), // New column
             'status' => __('Status', 'asset-manager'), 
             'issued_to' => __('Issued To', 'asset-manager'), 
             'date' => __('Date', 'asset-manager') 
@@ -473,13 +478,15 @@ class Asset_Manager {
         return $new_columns;
     }
 
+    // MODIFICATION: Added content for 'location' column
     public function custom_column_content($column, $post_id) {
         switch ($column) {
             case 'asset_tag': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'asset_tag', true)); break;
-            case 'model': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'model', true)); break; // Added model column content
+            case 'model': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'model', true)); break;
             case 'serial_number': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'serial_number', true)); break;
             case 'brand': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'brand', true)); break;
             case 'asset_category': $terms = get_the_terms($post_id, ASSET_MANAGER_TAXONOMY); if (!empty($terms) && !is_wp_error($terms)) { echo esc_html(implode(', ', wp_list_pluck($terms, 'name'))); } else { echo '—'; } break;
+            case 'location': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'location', true)); break; // New column content
             case 'status': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'status', true)); break;
             case 'issued_to': $user_id = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'issued_to', true); if ($user_id) { $user = get_userdata($user_id); echo esc_html($user ? $user->display_name : __('Unknown User', 'asset-manager')); } else { echo '—'; } break;
         }
@@ -493,6 +500,7 @@ class Asset_Manager {
         ?> <div class="wrap"> <h1><?php esc_html_e('Export Assets to PDF', 'asset-manager'); ?></h1> <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"> <input type="hidden" name="action" value="am_export_assets_pdf_action"> <?php wp_nonce_field('am_export_assets_pdf_nonce', 'am_export_nonce'); ?> <?php submit_button(__('Export All Assets as PDF', 'asset-manager')); ?> </form> </div> <?php
     }
 
+    // MODIFICATION: Added 'location' to PDF export and updated colspan
     public function export_assets_pdf() {
         if (!isset($_POST['am_export_nonce']) || !wp_verify_nonce($_POST['am_export_nonce'], 'am_export_assets_pdf_nonce')) { wp_die(__('Security check failed.', 'asset-manager'), __('Error', 'asset-manager'), ['response' => 403]); }
         if (!current_user_can('manage_options')) { wp_die(__('You do not have sufficient permissions to export assets.', 'asset-manager'), __('Error', 'asset-manager'), ['response' => 403]); }
@@ -507,16 +515,18 @@ class Asset_Manager {
         
         $assets_query = new WP_Query(['post_type' => ASSET_MANAGER_POST_TYPE, 'posts_per_page' => -1, 'orderby' => 'title', 'order' => 'ASC']);
         $html = '<style> table { width: 100%; border-collapse: collapse; font-size: 10px; } th, td { border: 1px solid #ddd; padding: 6px; text-align: left; vertical-align: top; } th { background-color: #f2f2f2; } </style>';
-        // IMPROVEMENT: Add Model to PDF export
-        $html .= '<h1>' . esc_html__('Asset List', 'asset-manager') . '</h1>'; $html .= '<table><thead><tr><th>' . esc_html__('Title', 'asset-manager') . '</th><th>' . esc_html__('Asset Tag', 'asset-manager') . '</th><th>' . esc_html__('Model', 'asset-manager') . '</th><th>' . esc_html__('Serial No.', 'asset-manager') . '</th><th>' . esc_html__('Brand', 'asset-manager') . '</th><th>' . esc_html__('Category', 'asset-manager') . '</th><th>' . esc_html__('Status', 'asset-manager') . '</th><th>' . esc_html__('Issued To', 'asset-manager') . '</th><th>' . esc_html__('Description', 'asset-manager') . '</th></tr></thead><tbody>';
+        $html .= '<h1>' . esc_html__('Asset List', 'asset-manager') . '</h1>'; 
+        // Added Location header
+        $html .= '<table><thead><tr><th>' . esc_html__('Title', 'asset-manager') . '</th><th>' . esc_html__('Asset Tag', 'asset-manager') . '</th><th>' . esc_html__('Model', 'asset-manager') . '</th><th>' . esc_html__('Serial No.', 'asset-manager') . '</th><th>' . esc_html__('Brand', 'asset-manager') . '</th><th>' . esc_html__('Category', 'asset-manager') . '</th><th>' . esc_html__('Location', 'asset-manager') . '</th><th>' . esc_html__('Status', 'asset-manager') . '</th><th>' . esc_html__('Issued To', 'asset-manager') . '</th><th>' . esc_html__('Description', 'asset-manager') . '</th></tr></thead><tbody>';
+        
         if ($assets_query->have_posts()) {
             while ($assets_query->have_posts()) {
                 $assets_query->the_post(); $post_id = get_the_ID();
                 $meta_values = [];
-                // Fetch all relevant meta for the PDF in a slightly more optimized way
+                // Added 'location' to keys for PDF
                 $asset_meta_keys_for_pdf = [
                     'asset_tag', 'model', 'serial_number', 'brand', 
-                    'status', 'issued_to', 'description'
+                    'status', 'issued_to', 'description', 'location'
                 ];
                 foreach ($asset_meta_keys_for_pdf as $field_key) { 
                      $meta_values[$field_key] = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . $field_key, true); 
@@ -524,9 +534,11 @@ class Asset_Manager {
 
                 $issued_to_name = '—'; if (!empty($meta_values['issued_to'])) { $user = get_userdata($meta_values['issued_to']); $issued_to_name = $user ? $user->display_name : __('Unknown User', 'asset-manager'); }
                 $categories = get_the_terms($post_id, ASSET_MANAGER_TAXONOMY); $category_name = (!empty($categories) && !is_wp_error($categories)) ? esc_html(implode(', ', wp_list_pluck($categories, 'name'))) : '—';
-                $html .= '<tr><td>' . esc_html(get_the_title()) . '</td><td>' . esc_html($meta_values['asset_tag']) . '</td><td>' . esc_html($meta_values['model']) . '</td><td>' . esc_html($meta_values['serial_number']) . '</td><td>' . esc_html($meta_values['brand']) . '</td><td>' . $category_name . '</td><td>' . esc_html($meta_values['status']) . '</td><td>' . esc_html($issued_to_name) . '</td><td>' . nl2br(esc_html($meta_values['description'])) . '</td></tr>';
+                // Added location data cell
+                $html .= '<tr><td>' . esc_html(get_the_title()) . '</td><td>' . esc_html($meta_values['asset_tag']) . '</td><td>' . esc_html($meta_values['model']) . '</td><td>' . esc_html($meta_values['serial_number']) . '</td><td>' . esc_html($meta_values['brand']) . '</td><td>' . $category_name . '</td><td>' . esc_html($meta_values['location']) . '</td><td>' . esc_html($meta_values['status']) . '</td><td>' . esc_html($issued_to_name) . '</td><td>' . nl2br(esc_html($meta_values['description'])) . '</td></tr>';
             } wp_reset_postdata();
-        } else { $html .= '<tr><td colspan="9">' . esc_html__('No assets found.', 'asset-manager') . '</td></tr>'; } $html .= '</tbody></table>'; // Colspan updated to 9
+        } else { $html .= '<tr><td colspan="10">' . esc_html__('No assets found.', 'asset-manager') . '</td></tr>'; } // Colspan updated to 10
+        $html .= '</tbody></table>'; 
         try { $mpdf = new \Mpdf\Mpdf(['mode' => 'utf-8', 'format' => 'A4-L']); $mpdf->SetTitle(esc_attr__('Asset List', 'asset-manager')); $mpdf->SetAuthor(esc_attr(get_bloginfo('name'))); $mpdf->WriteHTML($html); $mpdf->Output('assets-' . date('Y-m-d') . '.pdf', 'D'); exit; } catch (\Mpdf\MpdfException $e) { wp_die(sprintf(esc_html__('Error generating PDF: %s', 'asset-manager'), esc_html($e->getMessage())), esc_html__('PDF Generation Error', 'asset-manager'), ['back_link' => true]); }
     }
 
@@ -536,8 +548,9 @@ class Asset_Manager {
 
     public function get_dashboard_data() {
         $status_data = []; $user_data = []; $category_data_counts = [];
+        // Note: Location data is not added to the dashboard in this modification.
+        // If you want charts by location, you would need to add logic here similar to status, user, and category.
         
-        // Initialize status data with all known statuses, including "Unassigned"
         foreach ($this->status_options as $status_opt) {
             $status_data[$status_opt] = 0;
         }
@@ -552,7 +565,7 @@ class Asset_Manager {
             }
         }
         $category_data_counts[__('Uncategorized', 'asset-manager')] = 0;
-        $user_data[__('Unassigned', 'asset-manager')] = 0; // For users
+        $user_data[__('Unassigned', 'asset-manager')] = 0; 
 
         $assets_query = new WP_Query(['post_type' => ASSET_MANAGER_POST_TYPE, 'posts_per_page' => -1]);
 
@@ -564,16 +577,15 @@ class Asset_Manager {
                 // Status
                 $status_val = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'status', true);
                 $display_status = '';
-                if (empty($status_val)) { // If meta is empty, it's 'Unassigned'
-                    $display_status = 'Unassigned'; // This is now a primary status option
+                if (empty($status_val)) { 
+                    $display_status = 'Unassigned'; 
                 } elseif (in_array($status_val, $this->status_options, true)) {
                     $display_status = $status_val;
-                } else { // If status has a value but it's not a known one (e.g. old data)
+                } else { 
                     $display_status = __('Unknown', 'asset-manager');
                 }
-                // Ensure the key exists in $status_data before incrementing, especially for 'Unknown'
                 if (!isset($status_data[$display_status])) {
-                     $status_data[$display_status] = 0; // Initialize if somehow not caught by pre-initialization
+                     $status_data[$display_status] = 0; 
                 }
                 $status_data[$display_status]++;
 
@@ -581,7 +593,7 @@ class Asset_Manager {
                 // User
                 $user_id = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'issued_to', true);
                 $user_name_key = __('Unassigned', 'asset-manager');
-                if ($user_id) { // Check if $user_id is not empty or 0
+                if ($user_id) { 
                     $user = get_userdata($user_id);
                     $user_name_key = $user ? esc_html($user->display_name) : sprintf(__('Unknown User (ID: %d)', 'asset-manager'), $user_id);
                 }
@@ -604,7 +616,7 @@ class Asset_Manager {
             wp_reset_postdata();
         }
         return [
-            'status' => array_filter($status_data, function($count){ return $count >= 0; }), // Show statuses even if count is 0
+            'status' => array_filter($status_data, function($count){ return $count >= 0; }), 
             'users' => array_filter($user_data, function($count){ return $count > 0; }),
             'categories' => array_filter($category_data_counts, function($count){ return $count > 0; })
         ];
