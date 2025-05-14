@@ -17,6 +17,43 @@ define('ASSET_MANAGER_TAXONOMY', 'asset_category');
 define('ASSET_MANAGER_META_PREFIX', '_asset_manager_');
 
 class Asset_Manager {
+    // Auto-increment title for Asset post type in format 00001, 00002, ...
+    public function auto_increment_title($data, $postarr) {
+        if ($data['post_type'] !== ASSET_MANAGER_POST_TYPE) {
+            return $data;
+        }
+
+        // Only modify title on auto-draft or if title is empty (new post)
+        if ($data['post_status'] === 'auto-draft' || !empty($data['post_title'])) {
+            return $data;
+        }
+
+        // Get the latest asset post by title in descending order
+        $args = [
+            'post_type'      => ASSET_MANAGER_POST_TYPE,
+            'post_status'    => 'publish',
+            'posts_per_page' => 1,
+            'orderby'        => 'title',
+            'order'          => 'DESC',
+            'fields'         => 'ids',
+        ];
+
+        $latest = get_posts($args);
+        $last_number = 0;
+
+        if (!empty($latest)) {
+            $last_post = get_post($latest[0]);
+            if (preg_match('/^0*(\\d+)$/', $last_post->post_title, $matches)) {
+                $last_number = intval($matches[1]);
+            }
+        }
+
+        $next_number = $last_number + 1;
+        $data['post_title'] = str_pad($next_number, 5, '0', STR_PAD_LEFT);
+
+        return $data;
+    }
+
 
     public function add_image_meta_box() {
         add_meta_box(
@@ -1011,6 +1048,3 @@ class Asset_Manager {
 } // End Class Asset_Manager
 
 new Asset_Manager();
-
-// Helper function for redirect transient, if needed to be outside the class context for removal
-// function asset_manager_redirect_on_error_fix($location){ /* defined inline now */ return $location; }
