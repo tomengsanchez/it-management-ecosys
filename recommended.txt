@@ -1,0 +1,13 @@
+Implement pagination for the PDF export to handle large asset inventories
+
+Add bulk edit functionality for common operations like status changes
+
+Enhance the dashboard with more metrics and filtering options
+
+Implement the shortcode system for frontend display of assets
+
+Add search functionality to quickly locate specific assets
+
+Consider implementing REST API endpoints for integration with other systems
+
+Add QR code generation for asset tags to facilitate physical inventory checks
