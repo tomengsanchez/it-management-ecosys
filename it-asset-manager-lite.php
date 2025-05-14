@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Asset Manager
  * Description: Custom post type for managing assets with history tracking, custom fields, PDF export, and more.
- * Version: 1.8.3 
+ * Version: 1.8.4
  * Author: Your Name
  * Text Domain: asset-manager
  * Domain Path: /languages
@@ -11,7 +11,7 @@
 if (!defined('ABSPATH')) exit; // Exit if accessed directly
 
 // Define constants
-define('ASSET_MANAGER_VERSION', '1.8.3'); // MODIFIED version - Updated for new field
+define('ASSET_MANAGER_VERSION', '1.8.4'); // MODIFIED version - Added filters and enhanced search
 define('ASSET_MANAGER_POST_TYPE', 'asset');
 define('ASSET_MANAGER_TAXONOMY', 'asset_category');
 define('ASSET_MANAGER_META_PREFIX', '_asset_manager_');
@@ -129,6 +129,11 @@ class Asset_Manager {
             add_action('admin_post_am_export_assets_pdf_action', [$this, 'export_assets_pdf']);
             add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_assets']);
             add_action('admin_notices', [$this, 'display_admin_notices']);
+
+            // New actions for filters and search
+            add_action('restrict_manage_posts', [$this, 'add_asset_filters_to_admin_list']);
+            add_action('pre_get_posts', [$this, 'filter_assets_query']);
+            add_action('pre_get_posts', [$this, 'extend_asset_search_query']);
         }
     }
 
@@ -165,11 +170,16 @@ class Asset_Manager {
         global $post_type, $pagenow;
 
         $is_asset_manager_cpt_screen = ($post_type === ASSET_MANAGER_POST_TYPE && in_array($pagenow, ['post.php', 'post-new.php']));
+        $is_asset_manager_list_screen = ($pagenow === 'edit.php' && isset($_GET['post_type']) && $_GET['post_type'] === ASSET_MANAGER_POST_TYPE);
         $is_asset_manager_dashboard_screen = strpos($hook, ASSET_MANAGER_POST_TYPE.'_page_asset_dashboard') !== false;
         $is_asset_manager_export_screen = strpos($hook, ASSET_MANAGER_POST_TYPE.'_page_export-assets') !== false;
 
-        if ($is_asset_manager_cpt_screen || $is_asset_manager_dashboard_screen || $is_asset_manager_export_screen) {
+        if ($is_asset_manager_cpt_screen || $is_asset_manager_dashboard_screen || $is_asset_manager_export_screen || $is_asset_manager_list_screen) {
             wp_enqueue_style('asset-manager-admin-css', plugin_dir_url(__FILE__) . 'css/asset-manager.css', [], ASSET_MANAGER_VERSION);
+        }
+        
+        if ($is_asset_manager_list_screen) {
+             // Potentially add JS for select2 if desired for filters, not strictly necessary for basic dropdowns
         }
 
         if ($is_asset_manager_dashboard_screen) {
@@ -305,7 +315,11 @@ class Asset_Manager {
                  }
             } elseif (empty($value) && $value !== '0') { // Standard required field check, applies to 'location' too
                 if ($field_key === 'issued_to' && $form_data[$post_field_key] === '') {
-                    $errors[] = sprintf(__('The %s field is required; please select a user.', 'asset-manager'), $field_labels[$field_key]);
+                    // Allow 'issued_to' to be empty if status is 'Unassigned'
+                    $status_value = isset($form_data[ASSET_MANAGER_META_PREFIX . 'status']) ? trim($form_data[ASSET_MANAGER_META_PREFIX . 'status']) : '';
+                    if ($status_value !== 'Unassigned') {
+                        $errors[] = sprintf(__('The %s field is required; please select a user.', 'asset-manager'), $field_labels[$field_key]);
+                    }
                 } elseif ($field_key !== 'issued_to') { // All other text fields including 'location'
                     $errors[] = sprintf(__('The %s field is required.', 'asset-manager'), $field_labels[$field_key]);
                 }
@@ -332,19 +346,26 @@ class Asset_Manager {
         
         if (!empty($errors)) {
             set_transient('asset_manager_errors_' . $post_id . '_' . get_current_user_id(), $errors, 45);
-            add_filter('redirect_post_location', function($location) use ($post_id) {
-                if (get_transient('asset_manager_errors_' . $post_id . '_' . get_current_user_id())) {
-                    $location = remove_query_arg('message', $location);
-                }
-                return $location;
-            }, 99, 1);
+            // Ensure redirect_post_location filter is added only once if multiple saves happen quickly (though less likely for manual post saving)
+            if (!has_filter('redirect_post_location', 'asset_manager_redirect_on_error_fix')) {
+                 add_filter('redirect_post_location', function($location) use ($post_id) {
+                    // Check the transient with the same key used for setting it.
+                    if (get_transient('asset_manager_errors_' . $post_id . '_' . get_current_user_id())) {
+                        $location = remove_query_arg('message', $location);
+                    }
+                    return $location;
+                }, 99, 1);
+            }
             return;
         }
+
 
         $changes = [];
         $current_history = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'history', true) ?: [];
         if (!is_array($current_history)) $current_history = [];
         $field_labels = $this->get_field_labels();
+        $current_status = isset($_POST[ASSET_MANAGER_META_PREFIX . 'status']) ? sanitize_text_field($_POST[ASSET_MANAGER_META_PREFIX . 'status']) : null;
+
 
         foreach ($this->fields as $field_key) {
             $meta_key = ASSET_MANAGER_META_PREFIX . $field_key;
@@ -369,7 +390,8 @@ class Asset_Manager {
                     }
                     break;
                 case 'issued_to':
-                    $new_value_sanitized = absint($new_value_raw);
+                    // If status is 'Unassigned', 'issued_to' can be empty. Otherwise, it's absint.
+                     $new_value_sanitized = ($current_status === 'Unassigned' && empty($new_value_raw)) ? '' : absint($new_value_raw);
                     break;
                 case 'status': // Ensure the status is one of the predefined options
                     $new_value_sanitized = in_array($new_value_raw, $this->status_options, true) ? sanitize_text_field($new_value_raw) : $this->status_options[0]; // Default to first option (Unassigned) if invalid
@@ -384,11 +406,14 @@ class Asset_Manager {
             $new_value_comparable = $new_value_sanitized;
 
             if ($field_key === 'issued_to') {
-                $old_value_comparable = absint($old_value);
+                $old_value_comparable = ($old_value === '' || $old_value === '0') ? '' : absint($old_value);
+                $new_value_comparable = ($new_value_comparable === '' || $new_value_comparable === 0) ? '' : absint($new_value_comparable);
+
             } elseif (is_string($old_value_comparable) && is_string($new_value_comparable)) {
                 $old_value_comparable = trim($old_value_comparable);
                 $new_value_comparable = trim($new_value_comparable);
             }
+
 
             if ($new_value_comparable !== $old_value_comparable) {
                 update_post_meta($post_id, $meta_key, $new_value_sanitized);
@@ -402,14 +427,21 @@ class Asset_Manager {
                         $old_user_data = get_userdata($old_value_comparable);
                         $old_user_display = $old_user_data ? $old_user_data->display_name : sprintf(__('Unknown User (ID: %s)', 'asset-manager'), $old_value_comparable);
                     }
-                    $new_user_display = __('Unassigned', 'asset-manager'); // Default display for 0 or empty user ID
-                    if (!empty($new_value_comparable)) { // Check if new user ID is not 0 / empty
+                    $new_user_display = __('Unassigned', 'asset-manager'); 
+                    if (!empty($new_value_comparable)) { 
                         $new_user_data = get_userdata($new_value_comparable);
                         $new_user_display = $new_user_data ? $new_user_data->display_name : sprintf(__('Unknown User (ID: %s)', 'asset-manager'), $new_value_comparable);
                     }
-                    $changes[] = sprintf(esc_html__('%1$s changed from "%2$s" to "%3$s"', 'asset-manager'), esc_html($label), esc_html($old_user_display), esc_html($new_user_display));
-                } else { // Covers 'location' and other text fields
-                    $changes[] = sprintf(esc_html__('%1$s changed from "%2$s" to "%3$s"', 'asset-manager'), esc_html($label), esc_html((string)$old_value), esc_html((string)$new_value_sanitized));
+                    // Only log if there's a meaningful change (e.g. not from '' to 0 or vice-versa if they mean the same)
+                    if ($old_user_display !== $new_user_display) {
+                         $changes[] = sprintf(esc_html__('%1$s changed from "%2$s" to "%3$s"', 'asset-manager'), esc_html($label), esc_html($old_user_display), esc_html($new_user_display));
+                    }
+                } else { 
+                    $old_display = (string)$old_value === '' ? __('empty', 'asset-manager') : (string)$old_value;
+                    $new_display = (string)$new_value_sanitized === '' ? __('empty', 'asset-manager') : (string)$new_value_sanitized;
+                    if ($old_display !== $new_display) { // Avoid logging if truly unchanged (e.g. empty string to empty string)
+                        $changes[] = sprintf(esc_html__('%1$s changed from "%2$s" to "%3$s"', 'asset-manager'), esc_html($label), esc_html($old_display), esc_html($new_display));
+                    }
                 }
             }
         }
@@ -440,15 +472,18 @@ class Asset_Manager {
         if ($post_obj && (empty($post_obj->post_title) || $post_obj->post_title === __('Auto Draft') || $post_obj->post_title === '')) {
             $asset_tag_val = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'asset_tag', true);
             $new_title = !empty($asset_tag_val) ? sprintf(__('Asset: %s', 'asset-manager'), $asset_tag_val) : sprintf(__('Asset #%d', 'asset-manager'), $post_id);
+            
+            // Temporarily remove the action to prevent recursion
             remove_action('save_post_' . ASSET_MANAGER_POST_TYPE, [$this, 'save_asset_meta'], 10);
             wp_update_post(['ID' => $post_id, 'post_title' => $new_title]);
+            // Re-add the action
             add_action('save_post_' . ASSET_MANAGER_POST_TYPE, [$this, 'save_asset_meta'], 10, 2);
         }
     }
 
     public function display_admin_notices() {
         global $pagenow, $post;
-        if (($pagenow == 'post.php' || $pagenow == 'post-new.php') && isset($post->post_type) && $post->post_type == ASSET_MANAGER_POST_TYPE) {
+        if (($pagenow == 'post.php' || $pagenow == 'post-new.php') && isset($post->ID) && isset($post->post_type) && $post->post_type == ASSET_MANAGER_POST_TYPE) {
             $transient_key = 'asset_manager_errors_' . $post->ID . '_' . get_current_user_id();
             $errors = get_transient($transient_key);
             if (!empty($errors) && is_array($errors)) {
@@ -473,7 +508,8 @@ class Asset_Manager {
             'location' => __('Location', 'asset-manager'), // New column
             'status' => __('Status', 'asset-manager'), 
             'issued_to' => __('Issued To', 'asset-manager'), 
-            'date' => __('Date', 'asset-manager') 
+            'date_purchased_col' => __('Date Purchased', 'asset-manager'), // New column for date purchased
+            'date' => __('Date Created', 'asset-manager') // Original 'date' column (publish date)
         ]; 
         return $new_columns;
     }
@@ -486,9 +522,27 @@ class Asset_Manager {
             case 'serial_number': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'serial_number', true)); break;
             case 'brand': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'brand', true)); break;
             case 'asset_category': $terms = get_the_terms($post_id, ASSET_MANAGER_TAXONOMY); if (!empty($terms) && !is_wp_error($terms)) { echo esc_html(implode(', ', wp_list_pluck($terms, 'name'))); } else { echo '—'; } break;
-            case 'location': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'location', true)); break; // New column content
+            case 'location': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'location', true)); break; 
             case 'status': echo esc_html(get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'status', true)); break;
-            case 'issued_to': $user_id = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'issued_to', true); if ($user_id) { $user = get_userdata($user_id); echo esc_html($user ? $user->display_name : __('Unknown User', 'asset-manager')); } else { echo '—'; } break;
+            case 'issued_to': 
+                $user_id = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'issued_to', true); 
+                if ($user_id) { 
+                    $user = get_userdata($user_id); 
+                    echo esc_html($user ? $user->display_name : __('Unknown User', 'asset-manager')); 
+                } else { 
+                    // Check if status is Unassigned
+                    $status = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'status', true);
+                    if ($status === 'Unassigned') {
+                         echo __('Unassigned', 'asset-manager');
+                    } else {
+                        echo '—'; 
+                    }
+                } 
+                break;
+            case 'date_purchased_col': 
+                $date_purchased = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'date_purchased', true);
+                echo esc_html($date_purchased ? date_i18n(get_option('date_format'), strtotime($date_purchased)) : '—');
+                break;
         }
     }
 
@@ -516,28 +570,37 @@ class Asset_Manager {
         $assets_query = new WP_Query(['post_type' => ASSET_MANAGER_POST_TYPE, 'posts_per_page' => -1, 'orderby' => 'title', 'order' => 'ASC']);
         $html = '<style> table { width: 100%; border-collapse: collapse; font-size: 10px; } th, td { border: 1px solid #ddd; padding: 6px; text-align: left; vertical-align: top; } th { background-color: #f2f2f2; } </style>';
         $html .= '<h1>' . esc_html__('Asset List', 'asset-manager') . '</h1>'; 
-        // Added Location header
-        $html .= '<table><thead><tr><th>' . esc_html__('Title', 'asset-manager') . '</th><th>' . esc_html__('Asset Tag', 'asset-manager') . '</th><th>' . esc_html__('Model', 'asset-manager') . '</th><th>' . esc_html__('Serial No.', 'asset-manager') . '</th><th>' . esc_html__('Brand', 'asset-manager') . '</th><th>' . esc_html__('Category', 'asset-manager') . '</th><th>' . esc_html__('Location', 'asset-manager') . '</th><th>' . esc_html__('Status', 'asset-manager') . '</th><th>' . esc_html__('Issued To', 'asset-manager') . '</th><th>' . esc_html__('Description', 'asset-manager') . '</th></tr></thead><tbody>';
+        // Added Location header and Date Purchased
+        $html .= '<table><thead><tr><th>' . esc_html__('Title', 'asset-manager') . '</th><th>' . esc_html__('Asset Tag', 'asset-manager') . '</th><th>' . esc_html__('Model', 'asset-manager') . '</th><th>' . esc_html__('Serial No.', 'asset-manager') . '</th><th>' . esc_html__('Brand', 'asset-manager') . '</th><th>' . esc_html__('Category', 'asset-manager') . '</th><th>' . esc_html__('Location', 'asset-manager') . '</th><th>' . esc_html__('Status', 'asset-manager') . '</th><th>' . esc_html__('Issued To', 'asset-manager') . '</th><th>' . esc_html__('Date Purchased', 'asset-manager') . '</th><th>' . esc_html__('Description', 'asset-manager') . '</th></tr></thead><tbody>';
         
         if ($assets_query->have_posts()) {
             while ($assets_query->have_posts()) {
                 $assets_query->the_post(); $post_id = get_the_ID();
                 $meta_values = [];
-                // Added 'location' to keys for PDF
+                // Added 'location' and 'date_purchased' to keys for PDF
                 $asset_meta_keys_for_pdf = [
                     'asset_tag', 'model', 'serial_number', 'brand', 
-                    'status', 'issued_to', 'description', 'location'
+                    'status', 'issued_to', 'description', 'location', 'date_purchased'
                 ];
                 foreach ($asset_meta_keys_for_pdf as $field_key) { 
                      $meta_values[$field_key] = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . $field_key, true); 
                 }
 
-                $issued_to_name = '—'; if (!empty($meta_values['issued_to'])) { $user = get_userdata($meta_values['issued_to']); $issued_to_name = $user ? $user->display_name : __('Unknown User', 'asset-manager'); }
+                $issued_to_name = '—'; 
+                if (!empty($meta_values['issued_to'])) { 
+                    $user = get_userdata($meta_values['issued_to']); 
+                    $issued_to_name = $user ? $user->display_name : __('Unknown User', 'asset-manager'); 
+                } else {
+                    if ($meta_values['status'] === 'Unassigned') {
+                        $issued_to_name = __('Unassigned', 'asset-manager');
+                    }
+                }
                 $categories = get_the_terms($post_id, ASSET_MANAGER_TAXONOMY); $category_name = (!empty($categories) && !is_wp_error($categories)) ? esc_html(implode(', ', wp_list_pluck($categories, 'name'))) : '—';
-                // Added location data cell
-                $html .= '<tr><td>' . esc_html(get_the_title()) . '</td><td>' . esc_html($meta_values['asset_tag']) . '</td><td>' . esc_html($meta_values['model']) . '</td><td>' . esc_html($meta_values['serial_number']) . '</td><td>' . esc_html($meta_values['brand']) . '</td><td>' . $category_name . '</td><td>' . esc_html($meta_values['location']) . '</td><td>' . esc_html($meta_values['status']) . '</td><td>' . esc_html($issued_to_name) . '</td><td>' . nl2br(esc_html($meta_values['description'])) . '</td></tr>';
+                $date_purchased_formatted = $meta_values['date_purchased'] ? date_i18n(get_option('date_format'), strtotime($meta_values['date_purchased'])) : '—';
+                // Added location and date purchased data cell
+                $html .= '<tr><td>' . esc_html(get_the_title()) . '</td><td>' . esc_html($meta_values['asset_tag']) . '</td><td>' . esc_html($meta_values['model']) . '</td><td>' . esc_html($meta_values['serial_number']) . '</td><td>' . esc_html($meta_values['brand']) . '</td><td>' . $category_name . '</td><td>' . esc_html($meta_values['location']) . '</td><td>' . esc_html($meta_values['status']) . '</td><td>' . esc_html($issued_to_name) . '</td><td>' . esc_html($date_purchased_formatted) . '</td><td>' . nl2br(esc_html($meta_values['description'])) . '</td></tr>';
             } wp_reset_postdata();
-        } else { $html .= '<tr><td colspan="10">' . esc_html__('No assets found.', 'asset-manager') . '</td></tr>'; } // Colspan updated to 10
+        } else { $html .= '<tr><td colspan="11">' . esc_html__('No assets found.', 'asset-manager') . '</td></tr>'; } // Colspan updated to 11
         $html .= '</tbody></table>'; 
         try { $mpdf = new \Mpdf\Mpdf(['mode' => 'utf-8', 'format' => 'A4-L']); $mpdf->SetTitle(esc_attr__('Asset List', 'asset-manager')); $mpdf->SetAuthor(esc_attr(get_bloginfo('name'))); $mpdf->WriteHTML($html); $mpdf->Output('assets-' . date('Y-m-d') . '.pdf', 'D'); exit; } catch (\Mpdf\MpdfException $e) { wp_die(sprintf(esc_html__('Error generating PDF: %s', 'asset-manager'), esc_html($e->getMessage())), esc_html__('PDF Generation Error', 'asset-manager'), ['back_link' => true]); }
     }
@@ -578,6 +641,7 @@ class Asset_Manager {
                 $status_val = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'status', true);
                 $display_status = '';
                 if (empty($status_val)) { 
+                    // If status meta is empty, but we have a default "Unassigned"
                     $display_status = 'Unassigned'; 
                 } elseif (in_array($status_val, $this->status_options, true)) {
                     $display_status = $status_val;
@@ -592,11 +656,18 @@ class Asset_Manager {
 
                 // User
                 $user_id = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'issued_to', true);
+                $current_asset_status = get_post_meta($post_id, ASSET_MANAGER_META_PREFIX . 'status', true);
                 $user_name_key = __('Unassigned', 'asset-manager');
+
                 if ($user_id) { 
                     $user = get_userdata($user_id);
                     $user_name_key = $user ? esc_html($user->display_name) : sprintf(__('Unknown User (ID: %d)', 'asset-manager'), $user_id);
+                } elseif ($current_asset_status !== 'Unassigned' && empty($user_id)) {
+                    // If not explicitly unassigned status, but no user, count as 'Needs Assignment' or similar for clarity
+                    // For simplicity here, we'll still use Unassigned or make a new category like 'Needs User Assignment'
+                     $user_name_key = __('Needs User (Not Unassigned Status)', 'asset-manager'); // Or handle as per requirements
                 }
+                // Ensure the key exists before incrementing
                 if (!isset($user_data[$user_name_key])) { 
                     $user_data[$user_name_key] = 0;
                 }
@@ -616,7 +687,7 @@ class Asset_Manager {
             wp_reset_postdata();
         }
         return [
-            'status' => array_filter($status_data, function($count){ return $count >= 0; }), 
+            'status' => array_filter($status_data, function($count){ return $count >= 0; }), // Keep zero counts for all defined statuses
             'users' => array_filter($user_data, function($count){ return $count > 0; }),
             'categories' => array_filter($category_data_counts, function($count){ return $count > 0; })
         ];
@@ -624,6 +695,322 @@ class Asset_Manager {
 
     public function register_shortcodes() { /* Placeholder */ }
 
+    /**
+     * Adds Category and Brand filters to the Asset list table.
+     */
+    public function add_asset_filters_to_admin_list() {
+        global $typenow;
+
+        if ($typenow == ASSET_MANAGER_POST_TYPE) {
+            // Category Filter
+            $selected_category = isset($_GET['asset_category_filter']) ? sanitize_text_field($_GET['asset_category_filter']) : '';
+            wp_dropdown_categories([
+                'show_option_all' => __('All Categories', 'asset-manager'),
+                'taxonomy'        => ASSET_MANAGER_TAXONOMY,
+                'name'            => 'asset_category_filter',
+                'orderby'         => 'name',
+                'selected'        => $selected_category,
+                'hierarchical'    => true,
+                'depth'           => 3,
+                'show_count'      => true,
+                'hide_empty'      => true,
+                'value_field'     => 'slug',
+            ]);
+
+            // Brand Filter
+            global $wpdb;
+            $meta_key = ASSET_MANAGER_META_PREFIX . 'brand';
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+            $brands = $wpdb->get_col($wpdb->prepare(
+                "SELECT DISTINCT meta_value FROM $wpdb->postmeta WHERE meta_key = %s ORDER BY meta_value ASC",
+                $meta_key
+            ));
+
+            $selected_brand = isset($_GET['asset_brand_filter']) ? sanitize_text_field($_GET['asset_brand_filter']) : '';
+            if (!empty($brands)) {
+                echo "<select name='asset_brand_filter' id='asset_brand_filter'>";
+                echo "<option value=''>" . esc_html__('All Brands', 'asset-manager') . "</option>";
+                foreach ($brands as $brand) {
+                    if (empty($brand)) continue;
+                    printf(
+                        "<option value='%s'%s>%s</option>",
+                        esc_attr($brand),
+                        selected($selected_brand, $brand, false),
+                        esc_html($brand)
+                    );
+                }
+                echo "</select>";
+            }
+        }
+    }
+
+    /**
+     * Modifies the main query based on selected filters.
+     */
+    public function filter_assets_query($query) {
+        global $pagenow;
+        $post_type = isset($_GET['post_type']) ? sanitize_text_field($_GET['post_type']) : '';
+
+        if (is_admin() && $pagenow == 'edit.php' && $post_type == ASSET_MANAGER_POST_TYPE && $query->is_main_query()) {
+            $meta_query_arr = $query->get('meta_query') ?: [];
+            if (!is_array($meta_query_arr)) { // Ensure it's an array
+                 $meta_query_arr = [];
+            }
+
+
+            // Category Filter
+            if (isset($_GET['asset_category_filter']) && !empty($_GET['asset_category_filter'])) {
+                $category_slug = sanitize_text_field($_GET['asset_category_filter']);
+                $tax_query = $query->get('tax_query') ?: [];
+                 if (!is_array($tax_query)) {
+                    $tax_query = [];
+                }
+                $tax_query[] = [
+                    'taxonomy' => ASSET_MANAGER_TAXONOMY,
+                    'field'    => 'slug',
+                    'terms'    => $category_slug,
+                ];
+                $query->set('tax_query', $tax_query);
+            }
+
+            // Brand Filter
+            if (isset($_GET['asset_brand_filter']) && !empty($_GET['asset_brand_filter'])) {
+                $brand_name = sanitize_text_field($_GET['asset_brand_filter']);
+                $meta_query_arr[] = [
+                    'key'     => ASSET_MANAGER_META_PREFIX . 'brand',
+                    'value'   => $brand_name,
+                    'compare' => '=',
+                ];
+            }
+            
+            if (!empty($meta_query_arr)) {
+                 if (count($meta_query_arr) > 1 && !isset($meta_query_arr['relation'])) {
+                     $meta_query_arr['relation'] = 'AND'; // Default relation for multiple filter conditions
+                 }
+                 $query->set('meta_query', $meta_query_arr);
+            }
+        }
+    }
+
+    /**
+     * Extends the search functionality for assets.
+     */
+    public function extend_asset_search_query($query) {
+        global $pagenow, $wpdb;
+        $post_type = $query->get('post_type');
+        $search_term = $query->get('s');
+
+        // Ensure it's the main query, on the edit.php admin page, for our CPT, and a search is being performed.
+        if (is_admin() && $query->is_main_query() && $pagenow === 'edit.php' && $post_type === ASSET_MANAGER_POST_TYPE && !empty($search_term)) {
+            
+            // Meta keys to search (excluding description, issued_to for direct meta search here)
+            // issued_to would require searching user names then mapping to IDs - more complex for this direct meta search.
+            // description is usually longer, title search is often enough.
+            $meta_keys_to_search = [
+                ASSET_MANAGER_META_PREFIX . 'asset_tag',
+                ASSET_MANAGER_META_PREFIX . 'model',
+                ASSET_MANAGER_META_PREFIX . 'serial_number',
+                ASSET_MANAGER_META_PREFIX . 'brand',
+                ASSET_MANAGER_META_PREFIX . 'location',
+                ASSET_MANAGER_META_PREFIX . 'status',
+                ASSET_MANAGER_META_PREFIX . 'date_purchased', // Simple LIKE search for date
+            ];
+
+            $search_meta_query = ['relation' => 'OR'];
+            foreach ($meta_keys_to_search as $meta_key) {
+                $search_meta_query[] = [
+                    'key'     => $meta_key,
+                    'value'   => $search_term,
+                    'compare' => 'LIKE',
+                ];
+            }
+
+            // To make the search work for title OR meta fields, we need a more complex approach
+            // than just setting meta_query, as that typically ANDs with the title search.
+            // We will use the 'posts_search' filter to modify the WHERE clause.
+
+            // Store the meta query args for use in the posts_search filter
+            // This is a bit of a workaround to pass data to the posts_search filter
+            // A cleaner way might involve a dedicated class property if this gets more complex.
+            $query->set('asset_manager_search_meta_query_args', $search_meta_query);
+
+            add_filter('posts_search', [$this, 'asset_search_where_clause'], 10, 2);
+            // We also need to join postmeta table
+            add_filter('posts_join', [$this, 'asset_search_join_clause'], 10, 2);
+            add_filter('posts_distinct', [$this, 'asset_search_distinct_clause'], 10, 2);
+
+
+            // Search by Category Name
+            // Find terms matching the search query
+            $matching_terms = get_terms([
+                'taxonomy'   => ASSET_MANAGER_TAXONOMY,
+                'name__like' => $search_term,
+                'fields'     => 'ids',
+                'hide_empty' => false,
+            ]);
+
+            // Search by Issued To (User Display Name)
+            $user_query_args = [
+                'search'         => '*' . esc_attr($search_term) . '*',
+                'search_columns' => ['user_login', 'user_nicename', 'user_email', 'display_name'],
+                'fields'         => 'ID',
+            ];
+            $matching_user_ids = get_users($user_query_args);
+
+
+            // Combine existing meta_query with search-specific meta_query
+            $current_meta_query = $query->get('meta_query');
+            if (!is_array($current_meta_query)) $current_meta_query = [];
+
+
+            $overall_meta_query = $current_meta_query; // Keep existing filters (like brand filter)
+            
+            $additional_or_conditions = ['relation' => 'OR'];
+            
+            // Add condition for matching our specific meta keys
+             $additional_or_conditions[] = $search_meta_query;
+
+
+            if (!empty($matching_terms) && is_array($matching_terms)) {
+                 $query->set('asset_manager_search_term_ids', $matching_terms);
+                // The actual tax_query for search will be handled in posts_search for OR condition
+            }
+            if (!empty($matching_user_ids) && is_array($matching_user_ids)) {
+                 $query->set('asset_manager_search_user_ids', $matching_user_ids);
+                // The actual meta_query for user search will be handled in posts_search for OR condition
+            }
+             // Remove the 's' parameter to prevent default title/content search if we handle it all in posts_search
+             // $query->set('s', ''); // This allows full control via posts_search
+        }
+    }
+
+    public function asset_search_join_clause($join, $query) {
+        global $wpdb;
+        if (is_admin() && $query->is_main_query() && $query->get('asset_manager_search_meta_query_args')) {
+            // Ensure postmeta is joined if not already
+            if (strpos($join, $wpdb->postmeta) === false) {
+                $join .= " LEFT JOIN $wpdb->postmeta ON ($wpdb->posts.ID = $wpdb->postmeta.post_id) ";
+            }
+            // Ensure term_relationships and term_taxonomy are joined for category search
+            if ($query->get('asset_manager_search_term_ids')) {
+                if (strpos($join, $wpdb->term_relationships) === false) {
+                    $join .= " LEFT JOIN $wpdb->term_relationships ON ($wpdb->posts.ID = $wpdb->term_relationships.object_id) ";
+                }
+                if (strpos($join, $wpdb->term_taxonomy) === false) {
+                     $join .= " LEFT JOIN $wpdb->term_taxonomy ON ($wpdb->term_relationships.term_taxonomy_id = $wpdb->term_taxonomy.term_taxonomy_id) ";
+                }
+                 if (strpos($join, $wpdb->terms) === false) {
+                    $join .= " LEFT JOIN $wpdb->terms ON ($wpdb->term_taxonomy.term_id = $wpdb->terms.term_id) ";
+                }
+            }
+        }
+        return $join;
+    }
+    
+    public function asset_search_distinct_clause($distinct, $query) {
+         if (is_admin() && $query->is_main_query() && ($query->get('asset_manager_search_meta_query_args') || $query->get('asset_manager_search_term_ids'))) {
+            return 'DISTINCT';
+        }
+        return $distinct;
+    }
+
+
+    public function asset_search_where_clause($where, $query) {
+        global $wpdb;
+        $search_term = $query->get('s');
+
+        if (is_admin() && $query->is_main_query() && !empty($search_term)) {
+            $meta_query_args = $query->get('asset_manager_search_meta_query_args');
+            $term_ids_to_search = $query->get('asset_manager_search_term_ids');
+            $user_ids_to_search = $query->get('asset_manager_search_user_ids');
+
+            if ($meta_query_args || $term_ids_to_search || $user_ids_to_search) {
+                $search_conditions = [];
+
+                // Keep original title/content search
+                $title_search = $wpdb->prepare("($wpdb->posts.post_title LIKE %s)", '%' . $wpdb->esc_like($search_term) . '%');
+                 // $content_search = $wpdb->prepare("($wpdb->posts.post_content LIKE %s)", '%' . $wpdb->esc_like($search_term) . '%');
+                 // $search_conditions[] = "($title_search OR $content_search)";
+                 $search_conditions[] = $title_search;
+
+
+                // Add meta field searches
+                if ($meta_query_args && isset($meta_query_args['relation']) && $meta_query_args['relation'] === 'OR') {
+                    $meta_sub_conditions = [];
+                    foreach ($meta_query_args as $arg) {
+                        if (is_array($arg) && isset($arg['key']) && isset($arg['value'])) {
+                            // Ensure the meta key is one of the specific keys we want to search
+                            $allowed_meta_keys = [
+                                ASSET_MANAGER_META_PREFIX . 'asset_tag', ASSET_MANAGER_META_PREFIX . 'model', 
+                                ASSET_MANAGER_META_PREFIX . 'serial_number', ASSET_MANAGER_META_PREFIX . 'brand', 
+                                ASSET_MANAGER_META_PREFIX . 'location', ASSET_MANAGER_META_PREFIX . 'status',
+                                ASSET_MANAGER_META_PREFIX . 'date_purchased'
+                            ];
+                            if (in_array($arg['key'], $allowed_meta_keys)) {
+                                $meta_sub_conditions[] = $wpdb->prepare(
+                                    "($wpdb->postmeta.meta_key = %s AND $wpdb->postmeta.meta_value LIKE %s)",
+                                    $arg['key'],
+                                    '%' . $wpdb->esc_like($arg['value']) . '%'
+                                );
+                            }
+                        }
+                    }
+                    if (!empty($meta_sub_conditions)) {
+                        $search_conditions[] = "(" . implode(' OR ', $meta_sub_conditions) . ")";
+                    }
+                }
+
+                // Add category name search
+                if (!empty($term_ids_to_search)) {
+                     $search_conditions[] = $wpdb->prepare(
+                        "($wpdb->term_taxonomy.taxonomy = %s AND $wpdb->terms.term_id IN (" . implode(',', array_map('intval', $term_ids_to_search)) . "))",
+                        ASSET_MANAGER_TAXONOMY
+                    );
+                }
+                
+                // Add issued_to (user) search
+                if (!empty($user_ids_to_search)) {
+                     $search_conditions[] = $wpdb->prepare(
+                        "($wpdb->postmeta.meta_key = %s AND $wpdb->postmeta.meta_value IN (" . implode(',', array_map('intval', $user_ids_to_search)) . "))",
+                        ASSET_MANAGER_META_PREFIX . 'issued_to'
+                    );
+                }
+
+
+                if (!empty($search_conditions)) {
+                    // Replace the original search clause with our combined OR conditions
+                    $where = " AND (" . implode(' OR ', $search_conditions) . ")";
+                    
+                    // If there were other meta queries from filters (e.g. brand filter), they need to be ANDed.
+                    // This is complex to merge here. The pre_get_posts approach for filters is generally better.
+                    // For simplicity, this override might affect pre-set meta_queries from filters if not handled carefully.
+                    // The current filter_assets_query runs on pre_get_posts and sets up meta_query.
+                    // This posts_search runs later. We need to ensure they combine correctly.
+                    // One way is to let filter_assets_query build its part, and then this appends the search conditions.
+
+                    // Let's try to preserve existing where clauses not related to the 's' parameter.
+                    // This is tricky because the original $where from WP search includes the title/content search.
+                    // A simple "OR" of everything can lead to too many results if filters are also active.
+                    // We need the filters (brand, category dropdown) to be ANDed with the result of the broad search.
+
+                    // The query structure should be: (Title LIKE %s% OR Meta1 LIKE %s% OR CatName LIKE %s% OR UserName LIKE %s%) AND (FilterBrand = X) AND (FilterCategory = Y)
+                    // The default $where generated by WP for 's' is like: AND (((wp_posts.post_title LIKE %s%))))
+                    // We are replacing this part.
+                }
+            }
+             // Remove the filter after use to avoid affecting other queries
+            remove_filter('posts_search', [$this, 'asset_search_where_clause'], 10, 2);
+            remove_filter('posts_join', [$this, 'asset_search_join_clause'], 10, 2);
+            remove_filter('posts_distinct', [$this, 'asset_search_distinct_clause'], 10, 2);
+
+        }
+        return $where;
+    }
+
+
 } // End Class Asset_Manager
 
 new Asset_Manager();
+
+// Helper function for redirect transient, if needed to be outside the class context for removal
+// function asset_manager_redirect_on_error_fix($location){ /* defined inline now */ return $location; }
